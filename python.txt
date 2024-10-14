@@ -1,0 +1,230 @@
+import pandas as pd
+import re
+from collections import defaultdict
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+import spacy
+
+def load_acronyms(file_path):
+    df = pd.read_csv(file_path)
+    acronyms = {}
+    for _, row in df.iterrows():
+        acronym = row['Acronym'].upper()
+        acronyms[acronym] = {
+            'meaning': row['Meaning'],
+            'description': row['Description']
+        }
+    return acronyms
+
+def preprocess_text(text):
+    # Convert to lowercase
+    text = text.lower()
+    # Remove punctuation
+    text = re.sub(r'[^\w\s]', '', text)
+    # Tokenize
+    tokens = word_tokenize(text)
+    # Remove stopwords
+    stop_words = set(stopwords.words('english'))
+    tokens = [word for word in tokens if word not in stop_words]
+    return tokens
+
+def identify_acronyms(question, acronyms, nlp):
+    # Tokenize and get POS tags
+    doc = nlp(question)
+    tokens = [token.text for token in doc]
+    pos_tags = [token.pos_ for token in doc]
+
+    identified = []
+    for i in range(len(tokens)):
+        for j in range(i+1, len(tokens)+1):
+            potential_acronym = ' '.join(tokens[i:j]).upper()
+            if potential_acronym in acronyms:
+                # Check if it's likely to be used as an acronym based on context
+                if all(pos != 'VERB' for pos in pos_tags[i:j]):  # Avoid verbs
+                    identified.append({
+                        'acronym': potential_acronym,
+                        'meaning': acronyms[potential_acronym]['meaning'],
+                        'description': acronyms[potential_acronym]['description'],
+                        'start': i,
+                        'end': j
+                    })
+
+    # Sort by length of acronym (longest first) to handle nested acronyms
+    identified.sort(key=lambda x: x['end'] - x['start'], reverse=True)
+
+    # Remove overlapping acronyms
+    final_identified = []
+    used_indices = set()
+    for item in identified:
+        if not any(i in used_indices for i in range(item['start'], item['end'])):
+            final_identified.append(item)
+            used_indices.update(range(item['start'], item['end']))
+
+    return final_identified
+
+def build_acronym_index(acronyms):
+    index = defaultdict(list)
+    for acronym in acronyms:
+        for char in acronym:
+            index[char].append(acronym)
+    return index
+
+def edit_distance(s1, s2):
+    m, n = len(s1), len(s2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if s1[i-1] == s2[j-1]:
+                dp[i][j] = dp[i-1][j-1]
+            else:
+                dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]) + 1
+    return dp[m][n]
+
+def fuzzy_match_acronyms(question, acronym_index, max_distance=2):
+    tokens = preprocess_text(question)
+    potential_matches = set()
+    for token in tokens:
+        for char in token.upper():
+            potential_matches.update(acronym_index[char])
+    
+    matches = []
+    for acronym in potential_matches:
+        distance = min(edit_distance(acronym, token.upper()) for token in tokens)
+        if distance <= max_distance:
+            matches.append((acronym, distance))
+    
+    return sorted(matches, key=lambda x: x[1])
+
+def process_question(question, acronyms, nlp, acronym_index):
+    # Exact matching
+    exact_matches = identify_acronyms(question, acronyms, nlp)
+    
+    # Fuzzy matching
+    fuzzy_matches = fuzzy_match_acronyms(question, acronym_index)
+    
+    # Combine results, prioritizing exact matches
+    all_matches = {match['acronym']: match for match in exact_matches}
+    for acronym, distance in fuzzy_matches:
+        if acronym not in all_matches:
+            all_matches[acronym] = {
+                'acronym': acronym,
+                'meaning': acronyms[acronym]['meaning'],
+                'description': acronyms[acronym]['description'],
+                'fuzzy_distance': distance
+            }
+    
+    return {
+        'original_question': question,
+        'identified_acronyms': list(all_matches.values())
+    }
+
+# Load dependencies
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+nlp = spacy.load("en_core_web_sm")
+
+# Load acronyms from CSV file
+acronyms = load_acronyms('your_csv_file.csv')
+acronym_index = build_acronym_index(acronyms)
+
+# Example usage
+question = "What about the AT system?"
+result = process_question(question, acronyms, nlp, acronym_index)
+
+print("Original question:", result['original_question'])
+print("\nIdentified acronyms:")
+for item in result['identified_acronyms']:
+    if 'fuzzy_distance' in item:
+        print(f"- {item['acronym']} (fuzzy match, distance: {item['fuzzy_distance']}): {item['meaning']}")
+    else:
+        print(f"- {item['acronym']} (exact match): {item['meaning']}")
+    print(f"  Description: {item['description'][:100]}...")  # Truncate description for readability
+
+# Additional example with "what is AT"
+fuzzy_question = "what is AT"
+fuzzy_result = process_question(fuzzy_question, acronyms, nlp, acronym_index)
+
+print("\nFuzzy question:", fuzzy_result['original_question'])
+print("Matched acronyms:")
+for item in fuzzy_result['identified_acronyms']:
+    if 'fuzzy_distance' in item:
+        print(f"- {item['acronym']} (fuzzy match, distance: {item['fuzzy_distance']}): {item['meaning']}")
+    else:
+        print(f"- {item['acronym']} (exact match): {item['meaning']}")
+    print(f"  Description: {item['description'][:100]}...")  
+
+
+
+
+--------------
+
+import pandas as pd
+from collections import defaultdict
+
+def load_acronyms(file_path):
+    df = pd.read_csv(file_path)
+    acronyms = {}
+    for _, row in df.iterrows():
+        acronym = row['Acronym'].upper()
+        acronyms[acronym] = {
+            'meaning': row['Meaning'],
+            'description': row['Description']
+        }
+    return acronyms
+
+def build_acronym_index(acronyms):
+    index = defaultdict(list)
+    for acronym in acronyms:
+        for char in acronym:
+            index[char].append(acronym)
+    return index
+
+def preprocess_text(text):
+    return text.upper().split()
+
+def edit_distance(s1, s2):
+    m, n = len(s1), len(s2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if s1[i-1] == s2[j-1]:
+                dp[i][j] = dp[i-1][j-1]
+            else:
+                dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]) + 1
+    return dp[m][n]
+
+def fuzzy_match_acronyms(question, acronym_index, max_distance=2):
+    tokens = preprocess_text(question)
+    potential_matches = set()
+    for token in tokens:
+        for char in token:
+            potential_matches.update(acronym_index[char])
+    
+    matches = []
+    for acronym in potential_matches:
+        distance = min(edit_distance(acronym, token) for token in tokens)
+        if distance <= max_distance:
+            matches.append((acronym, distance))
+    
+    return sorted(matches, key=lambda x: x[1])
+
+# Load acronyms from CSV file (you'll need to replace this with your actual file path)
+acronyms = load_acronyms('your_csv_file.csv')
+acronym_index = build_acronym_index(acronyms)
+
+# Example usage
+fuzzy_question = "what is AT"
+fuzzy_matches = fuzzy_match_acronyms(fuzzy_question, acronym_index)
+print("\nFuzzy matched acronyms:")
+for acronym, distance in fuzzy_matches[:5]:  # Show top 5 matches
+    print(f"- {acronym} (distance: {distance}): {acronyms[acronym]['meaning']}")
+    print(f"  Description: {acronyms[acronym]['description'][:100]}...") 
