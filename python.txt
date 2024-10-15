@@ -1,230 +1,105 @@
 import pandas as pd
 import re
-from collections import defaultdict
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-import spacy
+import json
+import logging
+from typing import List, Dict, Any
+from nltk.corpus import words as nltk_words
 
-def load_acronyms(file_path):
-    df = pd.read_csv(file_path)
-    acronyms = {}
-    for _, row in df.iterrows():
-        acronym = row['Acronym'].upper()
-        acronyms[acronym] = {
-            'meaning': row['Meaning'],
-            'description': row['Description']
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class AcronymIdentifier:
+    def __init__(self, csv_file_path: str):
+        self.acronyms = self._load_acronyms(csv_file_path)
+        self.common_words = set(word.lower() for word in nltk_words.words())
+        self.very_common_short_words = set(['it', 'is', 'at', 'on', 'in', 'to', 'of', 'for', 'the', 'and', 'a', 'an'])
+
+    def _load_acronyms(self, file_path: str) -> Dict[str, List[Dict[str, str]]]:
+        try:
+            # Load CSV and replace NaN values in 'Description' column with an empty string
+            df = pd.read_csv(file_path)
+            df['Description'] = df['Description'].fillna('')  # Replace NaN with empty string
+            acronyms = {}
+            for _, row in df.iterrows():
+                acronym = row['Acronym'].upper()
+                if acronym not in acronyms:
+                    acronyms[acronym] = []
+                acronyms[acronym].append({
+                    'meaning': row['Meaning'],
+                    'description': row['Description']
+                })
+            return acronyms
+        except Exception as e:
+            logger.error(f"Error loading acronyms from CSV: {e}")
+            raise
+
+    def _is_common_word(self, word: str) -> bool:
+        return word.lower() in self.common_words or word.lower() in self.very_common_short_words
+
+    def _is_likely_acronym(self, word: str, context: List[str]) -> bool:
+        upper_word = word.upper()
+        
+        if word.lower() in self.very_common_short_words and not word.isupper():
+            return False
+        
+        if upper_word in self.acronyms:
+            if len(word) <= 2 and self._is_common_word(word):
+                return word.isupper()
+            return True
+        
+        if word.isupper() and len(word) > 1:
+            return True
+        
+        if word.istitle() and context.index(word) == 0 and self._is_common_word(word):
+            return False
+        
+        if len(word) <= 3 and not self._is_common_word(word):
+            return True
+        
+        return False
+
+    def identify_acronyms(self, question: str) -> List[Dict[str, Any]]:
+        try:
+            identified = []
+            words = re.findall(r'\b\w+\b', question)
+            
+            for word in words:
+                upper_word = word.upper()
+                if upper_word in self.acronyms and self._is_likely_acronym(word, words):
+                    for meaning in self.acronyms[upper_word]:
+                        identified.append({
+                            'acronym': word,
+                            'meaning': meaning['meaning'],
+                            'description': meaning.get('description', '')  # Handle empty description
+                        })
+            
+            return identified
+        except Exception as e:
+            logger.error(f"Error identifying acronyms: {e}")
+            raise
+
+def get_acronyms(question: str, csv_file_path: str) -> str:
+    try:
+        # Initialize the AcronymIdentifier with the provided CSV file path
+        identifier = AcronymIdentifier(csv_file_path)
+        matches = identifier.identify_acronyms(question)
+        
+        result = {
+            'original_question': question,
+            'identified_acronyms': matches
         }
-    return acronyms
-
-def preprocess_text(text):
-    # Convert to lowercase
-    text = text.lower()
-    # Remove punctuation
-    text = re.sub(r'[^\w\s]', '', text)
-    # Tokenize
-    tokens = word_tokenize(text)
-    # Remove stopwords
-    stop_words = set(stopwords.words('english'))
-    tokens = [word for word in tokens if word not in stop_words]
-    return tokens
-
-def identify_acronyms(question, acronyms, nlp):
-    # Tokenize and get POS tags
-    doc = nlp(question)
-    tokens = [token.text for token in doc]
-    pos_tags = [token.pos_ for token in doc]
-
-    identified = []
-    for i in range(len(tokens)):
-        for j in range(i+1, len(tokens)+1):
-            potential_acronym = ' '.join(tokens[i:j]).upper()
-            if potential_acronym in acronyms:
-                # Check if it's likely to be used as an acronym based on context
-                if all(pos != 'VERB' for pos in pos_tags[i:j]):  # Avoid verbs
-                    identified.append({
-                        'acronym': potential_acronym,
-                        'meaning': acronyms[potential_acronym]['meaning'],
-                        'description': acronyms[potential_acronym]['description'],
-                        'start': i,
-                        'end': j
-                    })
-
-    # Sort by length of acronym (longest first) to handle nested acronyms
-    identified.sort(key=lambda x: x['end'] - x['start'], reverse=True)
-
-    # Remove overlapping acronyms
-    final_identified = []
-    used_indices = set()
-    for item in identified:
-        if not any(i in used_indices for i in range(item['start'], item['end'])):
-            final_identified.append(item)
-            used_indices.update(range(item['start'], item['end']))
-
-    return final_identified
-
-def build_acronym_index(acronyms):
-    index = defaultdict(list)
-    for acronym in acronyms:
-        for char in acronym:
-            index[char].append(acronym)
-    return index
-
-def edit_distance(s1, s2):
-    m, n = len(s1), len(s2)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
-    for i in range(m + 1):
-        dp[i][0] = i
-    for j in range(n + 1):
-        dp[0][j] = j
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if s1[i-1] == s2[j-1]:
-                dp[i][j] = dp[i-1][j-1]
-            else:
-                dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]) + 1
-    return dp[m][n]
-
-def fuzzy_match_acronyms(question, acronym_index, max_distance=2):
-    tokens = preprocess_text(question)
-    potential_matches = set()
-    for token in tokens:
-        for char in token.upper():
-            potential_matches.update(acronym_index[char])
-    
-    matches = []
-    for acronym in potential_matches:
-        distance = min(edit_distance(acronym, token.upper()) for token in tokens)
-        if distance <= max_distance:
-            matches.append((acronym, distance))
-    
-    return sorted(matches, key=lambda x: x[1])
-
-def process_question(question, acronyms, nlp, acronym_index):
-    # Exact matching
-    exact_matches = identify_acronyms(question, acronyms, nlp)
-    
-    # Fuzzy matching
-    fuzzy_matches = fuzzy_match_acronyms(question, acronym_index)
-    
-    # Combine results, prioritizing exact matches
-    all_matches = {match['acronym']: match for match in exact_matches}
-    for acronym, distance in fuzzy_matches:
-        if acronym not in all_matches:
-            all_matches[acronym] = {
-                'acronym': acronym,
-                'meaning': acronyms[acronym]['meaning'],
-                'description': acronyms[acronym]['description'],
-                'fuzzy_distance': distance
-            }
-    
-    return {
-        'original_question': question,
-        'identified_acronyms': list(all_matches.values())
-    }
-
-# Load dependencies
-import nltk
-nltk.download('punkt')
-nltk.download('stopwords')
-nlp = spacy.load("en_core_web_sm")
-
-# Load acronyms from CSV file
-acronyms = load_acronyms('your_csv_file.csv')
-acronym_index = build_acronym_index(acronyms)
-
-# Example usage
-question = "What about the AT system?"
-result = process_question(question, acronyms, nlp, acronym_index)
-
-print("Original question:", result['original_question'])
-print("\nIdentified acronyms:")
-for item in result['identified_acronyms']:
-    if 'fuzzy_distance' in item:
-        print(f"- {item['acronym']} (fuzzy match, distance: {item['fuzzy_distance']}): {item['meaning']}")
-    else:
-        print(f"- {item['acronym']} (exact match): {item['meaning']}")
-    print(f"  Description: {item['description'][:100]}...")  # Truncate description for readability
-
-# Additional example with "what is AT"
-fuzzy_question = "what is AT"
-fuzzy_result = process_question(fuzzy_question, acronyms, nlp, acronym_index)
-
-print("\nFuzzy question:", fuzzy_result['original_question'])
-print("Matched acronyms:")
-for item in fuzzy_result['identified_acronyms']:
-    if 'fuzzy_distance' in item:
-        print(f"- {item['acronym']} (fuzzy match, distance: {item['fuzzy_distance']}): {item['meaning']}")
-    else:
-        print(f"- {item['acronym']} (exact match): {item['meaning']}")
-    print(f"  Description: {item['description'][:100]}...")  
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error processing question: {e}")
+        return json.dumps({"error": str(e)})
 
 
 
 
---------------
+csv_file_path = ""
+question = ""
 
-import pandas as pd
-from collections import defaultdict
-
-def load_acronyms(file_path):
-    df = pd.read_csv(file_path)
-    acronyms = {}
-    for _, row in df.iterrows():
-        acronym = row['Acronym'].upper()
-        acronyms[acronym] = {
-            'meaning': row['Meaning'],
-            'description': row['Description']
-        }
-    return acronyms
-
-def build_acronym_index(acronyms):
-    index = defaultdict(list)
-    for acronym in acronyms:
-        for char in acronym:
-            index[char].append(acronym)
-    return index
-
-def preprocess_text(text):
-    return text.upper().split()
-
-def edit_distance(s1, s2):
-    m, n = len(s1), len(s2)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
-    for i in range(m + 1):
-        dp[i][0] = i
-    for j in range(n + 1):
-        dp[0][j] = j
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if s1[i-1] == s2[j-1]:
-                dp[i][j] = dp[i-1][j-1]
-            else:
-                dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]) + 1
-    return dp[m][n]
-
-def fuzzy_match_acronyms(question, acronym_index, max_distance=2):
-    tokens = preprocess_text(question)
-    potential_matches = set()
-    for token in tokens:
-        for char in token:
-            potential_matches.update(acronym_index[char])
-    
-    matches = []
-    for acronym in potential_matches:
-        distance = min(edit_distance(acronym, token) for token in tokens)
-        if distance <= max_distance:
-            matches.append((acronym, distance))
-    
-    return sorted(matches, key=lambda x: x[1])
-
-# Load acronyms from CSV file (you'll need to replace this with your actual file path)
-acronyms = load_acronyms('your_csv_file.csv')
-acronym_index = build_acronym_index(acronyms)
-
-# Example usage
-fuzzy_question = "what is AT"
-fuzzy_matches = fuzzy_match_acronyms(fuzzy_question, acronym_index)
-print("\nFuzzy matched acronyms:")
-for acronym, distance in fuzzy_matches[:5]:  # Show top 5 matches
-    print(f"- {acronym} (distance: {distance}): {acronyms[acronym]['meaning']}")
-    print(f"  Description: {acronyms[acronym]['description'][:100]}...") 
+# Call the get_acronyms function
+result = get_acronyms(question, csv_file_path)
